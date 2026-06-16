@@ -16,19 +16,8 @@ export default async function handler(req, res) {
     const html = response.data;
     const $ = cheerio.load(html);
 
-    // Basic info
     const title = $('title').text().trim() || 'No Title';
-    const meta = {};
-    $('meta').each((_, el) => {
-      const name = $(el).attr('name') || $(el).attr('property');
-      const content = $(el).attr('content');
-      if (name && content) meta[name] = content;
-    });
-
-    // Detect technologies
     const tech = detectTechnologies(html, response.headers);
-
-    // Security headers
     const headers = response.headers;
     const security = {
       HTTPS: url.startsWith('https://'),
@@ -38,11 +27,8 @@ export default async function handler(req, res) {
       'X-Content-Type-Options': !!headers['x-content-type-options'],
       'X-XSS-Protection': !!headers['x-xss-protection'],
     };
-
-    // Scan for APIs (common endpoints)
     const apiEndpoints = await scanAPIs(url);
 
-    // Build report
     const report = {
       url,
       status_code: response.status,
@@ -51,7 +37,6 @@ export default async function handler(req, res) {
       info: {
         Title: title,
         Server: headers.server || 'Unknown',
-        'IP Address': 'N/A',
         'Total Links': $('a').length,
         'Total Forms': $('form').length,
         'Total Images': $('img').length,
@@ -73,33 +58,28 @@ function detectTechnologies(html, headers) {
   const content = html.toLowerCase();
   const hdr = JSON.stringify(headers).toLowerCase();
 
-  // CMS
   if (content.includes('wp-content') || content.includes('wp-includes')) tech.CMS.push('WordPress');
   if (content.includes('joomla') || content.includes('media/jui')) tech.CMS.push('Joomla');
   if (content.includes('drupal') || content.includes('sites/all')) tech.CMS.push('Drupal');
   if (content.includes('magento') || content.includes('skin/frontend')) tech.CMS.push('Magento');
   if (content.includes('shopify') || content.includes('cdn.shopify.com')) tech.CMS.push('Shopify');
 
-  // Frameworks
   if (content.includes('laravel') || content.includes('csrfmiddlewaretoken')) tech.Frameworks.push('Laravel');
   if (content.includes('django') || content.includes('csrfmiddlewaretoken')) tech.Frameworks.push('Django');
   if (content.includes('react') || content.includes('__NEXT_DATA__')) tech.Frameworks.push('React');
   if (content.includes('vue') || content.includes('vue-router')) tech.Frameworks.push('Vue.js');
   if (content.includes('angular') || content.includes('ng-')) tech.Frameworks.push('Angular');
 
-  // Servers
   if (hdr.includes('server: apache')) tech.Servers.push('Apache');
   if (hdr.includes('server: nginx')) tech.Servers.push('Nginx');
   if (hdr.includes('server: microsoft-iis')) tech.Servers.push('IIS');
   if (hdr.includes('cloudflare') || hdr.includes('cf-ray')) tech.Servers.push('CloudFlare');
 
-  // Languages
   if (hdr.includes('x-powered-by: php')) tech.Languages.push('PHP');
   if (hdr.includes('x-powered-by: express') || hdr.includes('node')) tech.Languages.push('Node.js');
   if (hdr.includes('x-powered-by: python') || content.includes('django')) tech.Languages.push('Python');
   if (hdr.includes('x-powered-by: java') || hdr.includes('servlet')) tech.Languages.push('Java');
 
-  // CDN
   if (hdr.includes('cloudflare')) tech.CDN.push('CloudFlare');
   if (hdr.includes('akamai') || hdr.includes('x-akamai')) tech.CDN.push('Akamai');
   if (hdr.includes('fastly')) tech.CDN.push('Fastly');
@@ -121,19 +101,14 @@ function calculateScore(security, status, time) {
 }
 
 async function scanAPIs(baseUrl) {
-  const common = [
-    '/wp-json/', '/api/', '/api/v1/', '/graphql', '/rest/', '/soap/',
-    '/xmlrpc.php', '/admin/', '/phpmyadmin/', '/backup/', '/logs/'
-  ];
+  const common = ['/wp-json/', '/api/', '/api/v1/', '/graphql', '/rest/', '/soap/', '/xmlrpc.php', '/admin/', '/phpmyadmin/', '/backup/', '/logs/'];
   const found = [];
   for (const path of common) {
     try {
       const testUrl = baseUrl.replace(/\/+$/, '') + path;
       const resp = await axios.head(testUrl, { timeout: 3000 });
-      if (resp.status < 400) {
-        found.push({ endpoint: path, status: resp.status, type: 'HTTP' });
-      }
-    } catch (e) { /* ignore */ }
+      if (resp.status < 400) found.push({ endpoint: path, status: resp.status, type: 'HTTP' });
+    } catch (e) {}
   }
   return found;
 }
