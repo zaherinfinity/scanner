@@ -6,30 +6,27 @@ export default async function handler(req, res) {
   const { domain, limit = 50 } = req.body;
 
   try {
-    // 1. Try HackerTarget API (free, no key)
     let targets = [];
+    // 1. HackerTarget API (subdomain enumeration)
     try {
       const hackResp = await axios.get(`https://api.hackertarget.com/hostsearch/?q=${domain}`, { timeout: 8000 });
       const lines = hackResp.data.split('\n').filter(Boolean);
       const subdomains = lines.map(line => line.split(',')[0]).filter(s => s.includes(domain));
       targets = subdomains.map(s => `https://${s}`);
-    } catch (e) {
-      console.warn('HackerTarget failed, falling back to scraping');
-    }
+    } catch (e) { console.warn('HackerTarget failed, falling back to scraping'); }
 
-    // 2. If too few, scrape DuckDuckGo for "site:domain"
+    // 2. DuckDuckGo scraping for "site:domain"
     if (targets.length < limit) {
       const ddgTargets = await scrapeDuckDuckGo(domain, limit - targets.length);
       targets = [...targets, ...ddgTargets];
     }
 
-    // 3. Fallback: generate common subdomains
+    // 3. Fallback common subdomains if none found
     if (targets.length === 0) {
       const common = ['www', 'mail', 'admin', 'secure', 'portal', 'blog', 'shop', 'api'];
       targets = common.map(sub => `https://${sub}.${domain}`);
     }
 
-    // Trim and ensure uniqueness
     const unique = [...new Set(targets)].slice(0, limit);
     res.status(200).json({ targets: unique });
   } catch (error) {
@@ -47,16 +44,9 @@ async function scrapeDuckDuckGo(domain, needed) {
       timeout: 10000
     });
     const $ = cheerio.load(data);
-    $('a.result__url').each((_, el) => {
+    $('a.result__url, a[href*="' + domain + '"]').each((_, el) => {
       const href = $(el).attr('href');
-      if (href && href.startsWith('http') && href.includes(domain)) {
-        results.push(href);
-      }
-    });
-    // Also look for links in result snippets
-    $('a[href*="' + domain + '"]').each((_, el) => {
-      const href = $(el).attr('href');
-      if (href && href.startsWith('http') && !results.includes(href)) {
+      if (href && href.startsWith('http') && href.includes(domain) && !results.includes(href)) {
         results.push(href);
       }
     });
