@@ -2,64 +2,94 @@ import os
 import io
 import re
 import base64
+import sys
+import traceback
+from datetime import datetime
+
 import qrcode
 from flask import Flask, render_template, redirect, url_for, flash, request, jsonify
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 from dotenv import load_dotenv
+
+# Your database models – make sure models.py exists in the same directory
 from models import db, User, Product, Order
 
+# ----------------------------------------------------------------------
+# 1.  Handle KHQR gracefully – it may not be installable on PyPI
+# ----------------------------------------------------------------------
+KHQR_AVAILABLE = False
 try:
     from bakong_khqr import KHQR
     from bakong_khqr.models import IndividualInfo, CurrencyCode
     KHQR_AVAILABLE = True
 except ImportError:
-    KHQR_AVAILABLE = False
+    # The package is not available; we'll disable KHQR features
+    pass
 
-load_dotenv()
+load_dotenv()  # Load .env only for local development – ignored on Vercel
 
-
+# ----------------------------------------------------------------------
+# 2.  Database URL cleaning
+# ----------------------------------------------------------------------
 def _clean_db_url(url: str) -> str:
     """Normalize database URL for SQLAlchemy compatibility."""
+    if not url:
+        return ''
     # SQLAlchemy 1.4+ requires postgresql:// not postgres://
     if url.startswith('postgres://'):
         url = url.replace('postgres://', 'postgresql://', 1)
-    # Strip pgbouncer=true — not a valid SQLAlchemy param
+    # Strip pgbouncer=true – not a valid SQLAlchemy param
     url = re.sub(r'[&?]pgbouncer=true', '', url)
     return url
 
-
+# ----------------------------------------------------------------------
+# 3.  Flask app setup
+# ----------------------------------------------------------------------
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'change-this-in-production')
 
-# Use non-pooling URL for SQLAlchemy — avoids PgBouncer prepared-statement issues
+# Vercel provides POSTGRES_URL_NON_POOLING (or DATABASE_URL) – always prefer it
 _raw_url = (
     os.environ.get('POSTGRES_URL_NON_POOLING') or
     os.environ.get('DATABASE_URL') or
-    'sqlite:///store.db'
+    'sqlite:///store.db'          # fallback – but SQLite is read‑only on Vercel!
 )
 app.config['SQLALCHEMY_DATABASE_URI'] = _clean_db_url(_raw_url)
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+
+# Connection pool settings for serverless (avoid exhausted connections)
+engine_options = {
     'pool_pre_ping': True,
     'pool_recycle': 300,
-    'connect_args': {'sslmode': 'require'} if 'supabase' in _raw_url else {},
 }
+if 'supabase' in _raw_url:
+    engine_options['connect_args'] = {'sslmode': 'require'}
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = engine_options
+
+# Warn if we are using SQLite (won't work on Vercel)
+if 'sqlite' in _raw_url:
+    app.logger.warning(
+        "SQLite database detected. Vercel's filesystem is read‑only; "
+        "please set POSTGRES_URL_NON_POOLING or DATABASE_URL in your environment."
+    )
 
 db.init_app(app)
 
+# ----------------------------------------------------------------------
+# 4.  Login manager
+# ----------------------------------------------------------------------
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 login_manager.login_message = 'Please log in to access this page.'
-
 
 @login_manager.user_loader
 def load_user(user_id):
     return User.query.get(int(user_id))
 
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
+# ----------------------------------------------------------------------
+# 5.  KHQR generator (disabled if package missing)
+# ----------------------------------------------------------------------
 def generate_khqr(bakong_account, merchant_name, amount, bill_number):
     """Generate a KHQR string and return a base64 PNG data URI."""
     if not KHQR_AVAILABLE:
@@ -90,20 +120,18 @@ def generate_khqr(bakong_account, merchant_name, amount, bill_number):
     except Exception as e:
         return None, str(e)
 
-
-# ── Public routes ─────────────────────────────────────────────────────────────
-
+# ----------------------------------------------------------------------
+# 6.  Public routes
+# ----------------------------------------------------------------------
 @app.route('/')
 def index():
     products = Product.query.filter_by(active=True).order_by(Product.created_at.desc()).all()
     return render_template('index.html', products=products)
 
-
 @app.route('/product/<int:product_id>')
 def product_detail(product_id):
     product = Product.query.get_or_404(product_id)
     return render_template('product_detail.html', product=product)
-
 
 @app.route('/checkout/<int:product_id>', methods=['GET', 'POST'])
 def checkout(product_id):
@@ -155,7 +183,6 @@ def checkout(product_id):
 
     return render_template('checkout.html', product=product, order=None, qr_image=None)
 
-
 @app.route('/order/<int:order_id>/confirm', methods=['POST'])
 def confirm_payment(order_id):
     order = Order.query.get_or_404(order_id)
@@ -164,9 +191,9 @@ def confirm_payment(order_id):
     flash('Payment confirmed! The seller has been notified.', 'success')
     return redirect(url_for('index'))
 
-
-# ── Auth ──────────────────────────────────────────────────────────────────────
-
+# ----------------------------------------------------------------------
+# 7.  Authentication
+# ----------------------------------------------------------------------
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if current_user.is_authenticated:
@@ -216,7 +243,6 @@ def register():
 
     return render_template('register.html')
 
-
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if current_user.is_authenticated:
@@ -234,16 +260,15 @@ def login():
 
     return render_template('login.html')
 
-
 @app.route('/logout')
 @login_required
 def logout():
     logout_user()
     return redirect(url_for('index'))
 
-
-# ── Seller dashboard ──────────────────────────────────────────────────────────
-
+# ----------------------------------------------------------------------
+# 8.  Seller dashboard
+# ----------------------------------------------------------------------
 @app.route('/dashboard')
 @login_required
 def dashboard():
@@ -263,7 +288,6 @@ def dashboard():
                            products=products,
                            orders=orders,
                            total_revenue=total_revenue)
-
 
 @app.route('/product/add', methods=['GET', 'POST'])
 @login_required
@@ -306,7 +330,6 @@ def add_product():
 
     return render_template('add_product.html')
 
-
 @app.route('/product/<int:product_id>/edit', methods=['GET', 'POST'])
 @login_required
 def edit_product(product_id):
@@ -328,7 +351,6 @@ def edit_product(product_id):
 
     return render_template('add_product.html', product=product)
 
-
 @app.route('/product/<int:product_id>/delete', methods=['POST'])
 @login_required
 def delete_product(product_id):
@@ -340,7 +362,6 @@ def delete_product(product_id):
     db.session.commit()
     flash('Product removed from store.', 'success')
     return redirect(url_for('dashboard'))
-
 
 @app.route('/order/<int:order_id>/status', methods=['POST'])
 @login_required
@@ -354,10 +375,30 @@ def update_order_status(order_id):
         db.session.commit()
     return redirect(url_for('dashboard'))
 
+# ----------------------------------------------------------------------
+# 9.  Global error handler – shows traceback for debugging (remove later)
+# ----------------------------------------------------------------------
+@app.errorhandler(Exception)
+def handle_exception(e):
+    app.logger.error('Unhandled exception', exc_info=True)
+    # Return the full stack trace (only for debugging – disable in production!)
+    return traceback.format_exc(), 500
 
-# ── Init ──────────────────────────────────────────────────────────────────────
+# ----------------------------------------------------------------------
+# 10. Table creation – run this ONCE manually, not inside the request
+#     Uncomment and run locally, or use a separate script.
+# ----------------------------------------------------------------------
+# with app.app_context():
+#     db.create_all()
+#     print("✅ Tables created (or already exist)")
 
+# ----------------------------------------------------------------------
+# 11. Vercel entry point – must expose `application`
+# ----------------------------------------------------------------------
+application = app  # Vercel looks for 'application' by default
+
+# ----------------------------------------------------------------------
+# 12. Local development server
+# ----------------------------------------------------------------------
 if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()
     app.run(debug=True)
